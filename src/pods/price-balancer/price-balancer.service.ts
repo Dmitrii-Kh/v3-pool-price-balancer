@@ -22,7 +22,7 @@ export class PriceBalancerService implements OnModuleInit {
         const mainPoolAddress = this.configService.get<string>('MAIN_POOL_ADDRESS') as string;
         const targetPoolAddress = this.configService.get<string>('TARGET_POOL_ADDRESS') as string;
 
-        this.provider == new providers.JsonRpcProvider(web3ProviderUrl);
+        this.provider = new providers.JsonRpcProvider(web3ProviderUrl);
 
         this.mainPool = new Contract(mainPoolAddress, Contracts.MainPool.abi, this.provider);
         this.targetPool = new Contract(targetPoolAddress, Contracts.MainPool.abi, this.provider);
