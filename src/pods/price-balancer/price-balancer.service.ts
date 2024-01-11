@@ -35,15 +35,18 @@ export class PriceBalancerService implements OnModuleInit {
             this.provider = new providers.JsonRpcProvider(`${web3ProviderUrl}${web3ProviderAPIKey}`);
             this.wallet = new Wallet(walletPrivateKey, this.provider);
             this.mainPool = new Contract(mainPoolAddress, Contracts.MainPool.abi, this.provider);
-            this.targetPool = new Contract(targetPoolAddress, Contracts.MainPool.abi, this.provider);
+            // this.targetPool = new Contract(targetPoolAddress, Contracts.MainPool.abi, this.provider);
+
+            const poolInterface = this.mainPool.interface;
+            const topics = [poolInterface.getEventTopic(poolInterface.getEvent('Swap'))];
 
             this.provider.on(
                 {
                     address: this.mainPool.address,
-                    topics: [''],
+                    topics,
                 },
                 async (event: providers.Log) => {
-                    this.logger.debug(`Found price change event: ${event}`);
+                    this.logger.verbose(`Found price change event: ${event.toString()}`);
                     // TODO: calc & initialize price change in target pools
                     // IMPROVEMENT: create a job & add to the queue
                 },
