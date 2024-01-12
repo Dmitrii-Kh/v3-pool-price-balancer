@@ -1,7 +1,13 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Contract, ethers, providers, Wallet } from 'ethers';
+import { Contract, providers, Wallet } from 'ethers';
 import { Contracts } from '../../utils';
+
+type TradingPair<T extends Contract> = {
+    token0: T;
+    token1: T;
+};
 
 @Injectable()
 export class PriceBalancerService implements OnModuleInit {
@@ -11,6 +17,7 @@ export class PriceBalancerService implements OnModuleInit {
     private wallet: Wallet;
     private mainPool: Contract;
     private targetPool: Contract;
+    private tradingPair: TradingPair<Contract>;
 
     constructor(private readonly configService: ConfigService) {}
 
@@ -33,7 +40,13 @@ export class PriceBalancerService implements OnModuleInit {
             this.provider = new providers.JsonRpcProvider(`${web3ProviderUrl}${web3ProviderAPIKey}`);
             this.wallet = new Wallet(walletPrivateKey, this.provider);
             this.mainPool = new Contract(mainPoolAddress, Contracts.MainPool.abi, this.provider);
-            // this.targetPool = new Contract(targetPoolAddress, Contracts.MainPool.abi, this.provider);
+            this.targetPool = new Contract(targetPoolAddress, Contracts.MainPool.abi, this.provider);
+            const [token0Address, token1Address] = await Promise.all([this.mainPool.token0(), this.mainPool.token1()]);
+
+            this.tradingPair = {
+                token0: new Contract(token0Address, Contracts.ERC20.abi, this.provider),
+                token1: new Contract(token1Address, Contracts.ERC20.abi, this.provider),
+            };
 
             const poolInterface = this.mainPool.interface;
             const topics = [poolInterface.getEventTopic(poolInterface.getEvent('Swap'))];
@@ -44,52 +57,86 @@ export class PriceBalancerService implements OnModuleInit {
                     topics,
                 },
                 async (event: providers.Log) => {
-                    this.logger.verbose(`Found price change event: ${event.toString()}`);
+                    this.logger.verbose(`Found price change event`);
                     const { name } = poolInterface.parseLog(event);
                     const log = poolInterface.decodeEventLog(name, event.data, event.topics);
                     this.logger.verbose(`Event parsed to ${JSON.stringify(log)}`);
-                    const [ sqrtPriceX96 ] = log;
-
-                    // TODO: calc & initialize price change in target pools
-
-                    // compare sqrtPriceX96 in main and target pools
-                    // calc price = (sqrtPriceX96 / 2 ** 96) ** 2
-                    // rawTick = getTickAtSqrtPrice(price);
-                    // adjust for tickSpacing: tick = Math.round(rawTick / tickSpacing) * tickSpacing
-                    // get liquidity from adjusted tick
-                    // calc price delta
-                    // calc delta X/Y amount to be swapped
-
-                    // swap (get router v3 abi and address, get ERC20 contract, approve tokens)
-
-                    // IMPROVEMENT: create a job & add to the queue
+                    const { sqrtPriceX96, tick } = log;
+                    // IMPROVEMENT: create a Job & add to the message queue
+                    await this.balance(sqrtPriceX96, tick); // calculate & initialize price change in target pools
                 },
             );
         } catch (error) {
-            this.logger.error(error.toString());
+            this.logger.error(error.message);
         }
     }
 
-    private getTickAtSqrtPrice(sqrtPriceX96: number) {
-        return Math.floor(Math.log((sqrtPriceX96 / 2 ** 96) ** 2) / Math.log(1.0001));
+    public async balance(currentSqrtPriceInMain: number, currentTickInMain: number): Promise<void> {
+        try {
+            const { sqrtPriceX96: currentSqrtPriceInTarget, tick: currentTickInTarget } = await this.targetPool.slot0();
+            const tickSpacing = await this.targetPool.tickSpacing();
+            this.logger.debug(
+                `currentSqrtPriceInMain: ${currentSqrtPriceInMain},
+                currentTickInMain: ${currentTickInMain},
+                currentSqrtPriceInTarget: ${currentSqrtPriceInTarget},
+                currentTickInTarget: ${currentTickInTarget},
+                tickSpacingInTarget: ${tickSpacing}`,
+            );
+
+            // calc price = (sqrtPriceX96 / 2 ** 96) ** 2, price of X in terms of Y
+            const mainPoolPrice = this.getPriceFromSqrtX96(currentSqrtPriceInMain); // desired price for Target Pool
+            const targetPoolPrice = this.getPriceFromSqrtX96(currentSqrtPriceInTarget);
+
+            // adjust for tickSpacing: tick = Math.round(rawTick / tickSpacing) * tickSpacing
+            const adjustedTick = this.adjustTickForSpacing(currentTickInTarget, tickSpacing);
+
+            // get liquidity from adjusted tick
+            const { liquidity: liquidityInTarget } = await this.targetPool.ticks(adjustedTick);
+            const decimals0 = await this.tradingPair.token0.decimals();
+            const decimals1 = await this.tradingPair.token1.decimals();
+
+            this.logger.debug(
+                `mainPoolPrice: ${mainPoolPrice},
+                targetPoolPrice: ${targetPoolPrice}, 
+                adjustedTick: ${adjustedTick},
+                liquidityInTarget: ${liquidityInTarget},
+                decimals0: ${decimals0},
+                decimals1: ${decimals1}`,
+            );
+
+            // select token to be swapped
+            // calculate delta P, delta X(Y) amount to be swapped
+            let tokenToSwap: Contract, deltaPrice: number;
+            if (mainPoolPrice > targetPoolPrice) {
+                tokenToSwap = this.tradingPair.token1;
+                deltaPrice = Math.sqrt(mainPoolPrice) - Math.sqrt(targetPoolPrice);
+            } else if (mainPoolPrice < targetPoolPrice) {
+                tokenToSwap = this.tradingPair.token0;
+                deltaPrice = 1 / Math.sqrt(mainPoolPrice) - 1 / Math.sqrt(targetPoolPrice);
+            } else {
+                return;
+            }
+
+            const amountToSwap = (liquidityInTarget || 1) * deltaPrice; // set L=1 for testing purposes only
+
+            this.logger.debug(`
+                delta P: ${deltaPrice},
+                tokenToSwap: ${await tokenToSwap.name()},
+                amountToSwap: ${amountToSwap * 10 ** (await tokenToSwap.decimals())},
+            `);
+
+            // call routerv3.swap()
+            // get router v3 abi and address, get ERC20 contract, connect Wallet, approve tokens, swap
+        } catch (error) {
+            this.logger.error(error.message);
+        }
     }
 
-    private getPrice(sqrtPriceX96, decimals0, decimals1): number {
-        const buyOneOfToken0 = (sqrtPriceX96 / 2 ** 96) ** 2 / (10 ** decimals1 / 10 ** decimals0).toFixed(decimals1);
+    private getPriceFromSqrtX96(sqrtPriceX96: number): number {
+        return (sqrtPriceX96 / 2 ** 96) ** 2;
+    }
 
-        const buyOneOfToken1 = (1 / buyOneOfToken0).toFixed(decimals0);
-        this.logger.log('price of token0 in value of token1 : ' + buyOneOfToken0.toString());
-        this.logger.log('price of token1 in value of token0 : ' + buyOneOfToken1.toString());
-
-        // Convert to wei
-        const buyOneOfToken0Wei = Math.floor(buyOneOfToken0 * 10 ** decimals1).toLocaleString('fullwide', {
-            useGrouping: false,
-        });
-        const buyOneOfToken1Wei = Math.floor(buyOneOfToken1 * 10 ** decimals0).toLocaleString('fullwide', {
-            useGrouping: false,
-        });
-        this.logger.log('price of token0 in value of token1 in lowest decimal : ' + buyOneOfToken0Wei);
-        this.logger.log('price of token1 in value of token1 in lowest decimal : ' + buyOneOfToken1Wei);
-        return 0;
+    private adjustTickForSpacing(rawTick: number, tickSpacing: number): number {
+        return Math.round(rawTick / tickSpacing) * tickSpacing;
     }
 }
