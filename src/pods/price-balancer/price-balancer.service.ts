@@ -12,8 +12,6 @@ export class PriceBalancerService implements OnModuleInit {
     private mainPool: Contract;
     private targetPool: Contract;
 
-    //TODO: private interface, so I can get event topic
-
     constructor(private readonly configService: ConfigService) {}
 
     public async onModuleInit(): Promise<void> {
@@ -47,7 +45,23 @@ export class PriceBalancerService implements OnModuleInit {
                 },
                 async (event: providers.Log) => {
                     this.logger.verbose(`Found price change event: ${event.toString()}`);
+                    const { name } = poolInterface.parseLog(event);
+                    const log = poolInterface.decodeEventLog(name, event.data, event.topics);
+                    this.logger.verbose(`Event parsed to ${JSON.stringify(log)}`);
+                    const [ sqrtPriceX96 ] = log;
+
                     // TODO: calc & initialize price change in target pools
+
+                    // compare sqrtPriceX96 in main and target pools
+                    // calc price = (sqrtPriceX96 / 2 ** 96) ** 2
+                    // rawTick = getTickAtSqrtPrice(price);
+                    // adjust for tickSpacing: tick = Math.round(rawTick / tickSpacing) * tickSpacing
+                    // get liquidity from adjusted tick
+                    // calc price delta
+                    // calc delta X/Y amount to be swapped
+
+                    // swap (get router v3 abi and address, get ERC20 contract, approve tokens)
+
                     // IMPROVEMENT: create a job & add to the queue
                 },
             );
@@ -56,7 +70,26 @@ export class PriceBalancerService implements OnModuleInit {
         }
     }
 
-    private balancePrice(price: number): number {
+    private getTickAtSqrtPrice(sqrtPriceX96: number) {
+        return Math.floor(Math.log((sqrtPriceX96 / 2 ** 96) ** 2) / Math.log(1.0001));
+    }
+
+    private getPrice(sqrtPriceX96, decimals0, decimals1): number {
+        const buyOneOfToken0 = (sqrtPriceX96 / 2 ** 96) ** 2 / (10 ** decimals1 / 10 ** decimals0).toFixed(decimals1);
+
+        const buyOneOfToken1 = (1 / buyOneOfToken0).toFixed(decimals0);
+        this.logger.log('price of token0 in value of token1 : ' + buyOneOfToken0.toString());
+        this.logger.log('price of token1 in value of token0 : ' + buyOneOfToken1.toString());
+
+        // Convert to wei
+        const buyOneOfToken0Wei = Math.floor(buyOneOfToken0 * 10 ** decimals1).toLocaleString('fullwide', {
+            useGrouping: false,
+        });
+        const buyOneOfToken1Wei = Math.floor(buyOneOfToken1 * 10 ** decimals0).toLocaleString('fullwide', {
+            useGrouping: false,
+        });
+        this.logger.log('price of token0 in value of token1 in lowest decimal : ' + buyOneOfToken0Wei);
+        this.logger.log('price of token1 in value of token1 in lowest decimal : ' + buyOneOfToken1Wei);
         return 0;
     }
 }
