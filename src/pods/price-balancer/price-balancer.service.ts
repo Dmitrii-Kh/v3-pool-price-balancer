@@ -8,6 +8,7 @@ type TradingPair<T extends Contract> = {
     token0: T;
     token1: T;
 };
+const Q96 = 2 ** 96;
 
 @Injectable()
 export class PriceBalancerService implements OnModuleInit {
@@ -125,7 +126,7 @@ export class PriceBalancerService implements OnModuleInit {
                 amountToSwap: ${amountToSwap * 10 ** (await tokenToSwap.decimals())},
             `);
 
-            // call routerv3.swap()
+            // call RouterV3.swap()
             // get router v3 abi and address, get ERC20 contract, connect Wallet, approve tokens, swap
         } catch (error) {
             this.logger.error(error.message);
@@ -133,7 +134,7 @@ export class PriceBalancerService implements OnModuleInit {
     }
 
     private getPriceFromSqrtX96(sqrtPriceX96: number): number {
-        return (sqrtPriceX96 / 2 ** 96) ** 2;
+        return (sqrtPriceX96 / Q96) ** 2;
     }
 
     private adjustTickForSpacing(rawTick: number, tickSpacing: number): number {
