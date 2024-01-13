@@ -127,7 +127,6 @@ export class PriceBalancerService implements OnModuleInit {
             `);
 
             // call RouterV3.swap()
-            // get router v3 abi and address, get ERC20 contract, connect Wallet, approve tokens, swap
         } catch (error) {
             this.logger.error(error.message);
         }
