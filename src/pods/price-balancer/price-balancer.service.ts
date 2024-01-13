@@ -30,20 +30,27 @@ export class PriceBalancerService implements OnModuleInit {
             const mainPoolAddress = this.configService.get<string>('MAIN_POOL_ADDRESS') as string;
             const targetPoolAddress = this.configService.get<string>('TARGET_POOL_ADDRESS') as string;
             const rawWalletPrivateKey = this.configService.get<string>('PRIVATE_KEY');
+
+            if (!rawWalletPrivateKey) {
+                throw new Error('Wallet private key not provided');
+            }
             const walletPrivateKey = rawWalletPrivateKey?.startsWith('0x')
                 ? rawWalletPrivateKey
                 : `0x${rawWalletPrivateKey}`;
 
-            if (!walletPrivateKey) {
-                this.logger.error('Wallet private key not provided');
-                throw new Error('Wallet private key not provided');
+            if (!mainPoolAddress || !targetPoolAddress) {
+                throw new Error('One or more pool addresses missing');
             }
+            if (!web3ProviderUrl || !web3ProviderAPIKey) {
+                throw new Error('Web3 provider cannot be set up. One or more parameters missing');
+            }
+
             this.provider = new providers.JsonRpcProvider(`${web3ProviderUrl}${web3ProviderAPIKey}`);
             this.wallet = new Wallet(walletPrivateKey, this.provider);
             this.mainPool = new Contract(mainPoolAddress, Contracts.MainPool.abi, this.provider);
             this.targetPool = new Contract(targetPoolAddress, Contracts.MainPool.abi, this.provider);
-            const [token0Address, token1Address] = await Promise.all([this.mainPool.token0(), this.mainPool.token1()]);
 
+            const [token0Address, token1Address] = await Promise.all([this.mainPool.token0(), this.mainPool.token1()]);
             this.tradingPair = {
                 token0: new Contract(token0Address, Contracts.ERC20.abi, this.provider),
                 token1: new Contract(token1Address, Contracts.ERC20.abi, this.provider),
