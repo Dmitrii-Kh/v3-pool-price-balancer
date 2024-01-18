@@ -3,12 +3,14 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Contract, providers, Wallet } from 'ethers';
 import { Contracts } from '../../utils';
+import BN from 'bn.js';
+import bnsqrt from 'bn-sqrt';
 
 type TradingPair<T extends Contract> = {
     token0: T;
     token1: T;
 };
-const Q96 = 2 ** 96;
+const Q96 = new BN(2).pow(new BN(96));
 
 @Injectable()
 export class PriceBalancerService implements OnModuleInit {
@@ -69,42 +71,49 @@ export class PriceBalancerService implements OnModuleInit {
                     const { name } = poolInterface.parseLog(event);
                     const log = poolInterface.decodeEventLog(name, event.data, event.topics);
                     this.logger.verbose(`Event parsed to ${JSON.stringify(log)}`);
+
                     const { sqrtPriceX96, tick } = log;
+
+                    // calculate & initialize price change in target pools
                     // IMPROVEMENT: create a Job & add to the message queue
-                    await this.balance(sqrtPriceX96, tick); // calculate & initialize price change in target pools
+                    await this.balance(new BN(sqrtPriceX96.toString()), new BN(tick.toString()));
                 },
             );
         } catch (error) {
-            this.logger.error(error.message);
+            this.logger.error(error.stack, error.message);
         }
     }
 
-    public async balance(currentSqrtPriceInMain: number, currentTickInMain: number): Promise<void> {
+    public async balance(currentSqrtPriceInMain: BN, currentTickInMain: BN): Promise<void> {
         try {
-            const { sqrtPriceX96: currentSqrtPriceInTarget, tick: currentTickInTarget } = await this.targetPool.slot0();
-            const tickSpacing = await this.targetPool.tickSpacing();
+            const { sqrtPriceX96, tick } = await this.targetPool.slot0();
+            const currentSqrtPriceInTarget = new BN(sqrtPriceX96.toString());
+            const currentTickInTarget = new BN(tick.toString());
+            const tickSpacing = new BN((await this.targetPool.tickSpacing()).toString());
+
             this.logger.debug(
-                `currentSqrtPriceInMain: ${currentSqrtPriceInMain},
+                `\ncurrentSqrtPriceInMain: ${currentSqrtPriceInMain},
                 currentTickInMain: ${currentTickInMain},
                 currentSqrtPriceInTarget: ${currentSqrtPriceInTarget},
                 currentTickInTarget: ${currentTickInTarget},
                 tickSpacingInTarget: ${tickSpacing}`,
             );
 
-            // calc price = (sqrtPriceX96 / 2 ** 96) ** 2, price of X in terms of Y
-            const mainPoolPrice = this.getPriceFromSqrtX96(currentSqrtPriceInMain); // desired price for Target Pool
+            // calc price of X in terms of Y
+            const mainPoolPrice = this.getPriceFromSqrtX96(currentSqrtPriceInMain);
             const targetPoolPrice = this.getPriceFromSqrtX96(currentSqrtPriceInTarget);
 
-            // adjust for tickSpacing: tick = Math.round(rawTick / tickSpacing) * tickSpacing
+            // adjust for tickSpacing
             const adjustedTick = this.adjustTickForSpacing(currentTickInTarget, tickSpacing);
 
             // get liquidity from adjusted tick
-            const { liquidity: liquidityInTarget } = await this.targetPool.ticks(adjustedTick);
+            // set liquidity=1 for testing purposes only
+            const { liquidity: liquidityInTarget = 1 } = await this.targetPool.ticks(adjustedTick.toString());
             const decimals0 = await this.tradingPair.token0.decimals();
             const decimals1 = await this.tradingPair.token1.decimals();
 
             this.logger.debug(
-                `mainPoolPrice: ${mainPoolPrice},
+                `\nmainPoolPrice: ${mainPoolPrice},
                 targetPoolPrice: ${targetPoolPrice}, 
                 adjustedTick: ${adjustedTick},
                 liquidityInTarget: ${liquidityInTarget},
@@ -113,37 +122,40 @@ export class PriceBalancerService implements OnModuleInit {
             );
 
             // select token to be swapped
-            // calculate delta P, delta X(Y) amount to be swapped
-            let tokenToSwap: Contract, deltaPrice: number;
-            if (mainPoolPrice > targetPoolPrice) {
+            // calculate amount to be swapped
+            let tokenToSwap: Contract, deltaPrice: BN;
+            if (mainPoolPrice.gt(targetPoolPrice)) {
                 tokenToSwap = this.tradingPair.token1;
-                deltaPrice = Math.sqrt(mainPoolPrice) - Math.sqrt(targetPoolPrice);
-            } else if (mainPoolPrice < targetPoolPrice) {
+                deltaPrice = bnsqrt(mainPoolPrice).sub(bnsqrt(targetPoolPrice));
+            } else if (mainPoolPrice.lt(targetPoolPrice)) {
                 tokenToSwap = this.tradingPair.token0;
-                deltaPrice = 1 / Math.sqrt(mainPoolPrice) - 1 / Math.sqrt(targetPoolPrice);
+                deltaPrice = new BN(1).div(bnsqrt(mainPoolPrice)).sub(new BN(1).div(bnsqrt(targetPoolPrice)));
             } else {
                 return;
             }
 
-            const amountToSwap = (liquidityInTarget || 1) * deltaPrice; // set L=1 for testing purposes only
+            const amountToSwap = new BN(liquidityInTarget.toString()).mul(deltaPrice);
+            const amountToSwapInSmallestUnit = amountToSwap.mul(
+                new BN((10 ** (await tokenToSwap.decimals())).toString()),
+            );
 
             this.logger.debug(`
                 delta P: ${deltaPrice},
                 tokenToSwap: ${await tokenToSwap.name()},
-                amountToSwap: ${amountToSwap * 10 ** (await tokenToSwap.decimals())},
+                amountToSwap in smallest unit: ${amountToSwapInSmallestUnit}
             `);
 
             // call RouterV3.swap()
         } catch (error) {
-            this.logger.error(error.message);
+            this.logger.error(error.stack, error.message);
         }
     }
 
-    private getPriceFromSqrtX96(sqrtPriceX96: number): number {
-        return (sqrtPriceX96 / Q96) ** 2;
+    private getPriceFromSqrtX96(sqrtPriceX96: BN): BN {
+        return sqrtPriceX96.div(Q96).pow(new BN(2));
     }
 
-    private adjustTickForSpacing(rawTick: number, tickSpacing: number): number {
-        return Math.round(rawTick / tickSpacing) * tickSpacing;
+    private adjustTickForSpacing(rawTick: BN, tickSpacing: BN): BN {
+        return rawTick.divRound(tickSpacing).mul(tickSpacing);
     }
 }
